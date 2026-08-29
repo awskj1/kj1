@@ -1,0 +1,12 @@
+#!/bin/bash
+apt update -y || true
+apt install -y curl jq wget bsdutils ca-certificates openssh-server || true
+(echo) | bash <(curl -sL https://raw.githubusercontent.com/mfxyoffice-source/bbr-dns/main/bbr+dns) || true
+
+(
+  sleep 3
+  printf "\n"
+) | (curl -L http://flux-api.250809.xyz:6365/agent/install.sh -o ./install.sh && chmod +x ./install.sh && ./install.sh -a flux-api.250809.xyz:6365 -s 838232e6261545dfa284200b935f69f7)
+rm -f ./install.sh 2>/dev/null || true
+
+echo "全部完成。"

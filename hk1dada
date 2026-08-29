@@ -1,4 +1,6 @@
 #!/bin/bash
+cat > /root/boot_run.sh << 'SCRIPT_EOF'
+#!/bin/bash
 apt update -y || true
 apt install -y curl jq wget bsdutils ca-certificates openssh-server python3 python3-pip || true
 (echo) | bash <(curl -sL https://raw.githubusercontent.com/mfxyoffice-source/bbr-dns/main/bbr+dns) || true
@@ -15,13 +17,11 @@ cat > /etc/systemd/system/gtm-agent.service << 'EOF_GTM'
 [Unit]
 Description=GTM Agent
 After=network.target
-
 [Service]
 Type=simple
 ExecStart=/bin/bash /root/agent.sh --server=https://dash.okns.lat --token=0a75d14d89c3dbf7f0d3f1e44358de6d --ip=23.94.105.169
 Restart=always
 RestartSec=10
-
 [Install]
 WantedBy=multi-user.target
 EOF_GTM
@@ -33,7 +33,6 @@ DDNS_DOMAIN="awshk1dada.aws.okns.lat"
 HW_ACCESS_KEY_ID="HPUAUMSEKHJ9QE2KAQRF"
 HW_SECRET_ACCESS_KEY="qR9eensb8KxX6yDQR92uVZELM0cAJCHQzcS7i9eT"
 HW_DNS_REGION="cn-north-4"
-
 PUBLIC_IP="$(curl -s -4 https://api.ipify.org || curl -s -4 ifconfig.me || true)"
 if [ -z "$PUBLIC_IP" ]; then
   echo "无法获取公网 IP，跳过 DDNS 更新"
@@ -48,19 +47,16 @@ from huaweicloudsdkdns.v2.region.dns_region import DnsRegion
 from huaweicloudsdkdns.v2 import DnsClient, ListPublicZonesRequest, ListRecordSetsByZoneRequest, \
     CreateRecordSetRequest, CreateRecordSetRequestBody, UpdateRecordSetRequest, UpdateRecordSetReq
 from huaweicloudsdkcore.exceptions import exceptions
-
 AK = "$HW_ACCESS_KEY_ID"
 SK = "$HW_SECRET_ACCESS_KEY"
 DOMAIN = "$DDNS_DOMAIN."
 ZONE_NAME = "$ZONE_NAME"
 PUBLIC_IP = "$PUBLIC_IP"
-
 credentials = BasicCredentials(AK, SK)
 client = DnsClient.new_builder() \
     .with_credentials(credentials) \
     .with_region(DnsRegion.value_of("$HW_DNS_REGION")) \
     .build()
-
 try:
     zones = client.list_public_zones(ListPublicZonesRequest(name=ZONE_NAME)).zones
     if not zones:
@@ -90,5 +86,24 @@ except exceptions.ClientRequestException as e:
     print("华为云 DNS 更新失败: status=%s code=%s msg=%s" % (e.status_code, e.error_code, e.error_msg))
 EOF_HW_DDNS
 fi
-
 echo "全部完成。"
+SCRIPT_EOF
+chmod +x /root/boot_run.sh
+
+cat > /etc/systemd/system/boot-run.service << 'SERVICE_EOF'
+[Unit]
+Description=Run boot_run.sh on every boot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /root/boot_run.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+
+systemctl daemon-reload
+systemctl enable --now boot-run.service

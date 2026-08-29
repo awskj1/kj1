@@ -1,4 +1,5 @@
 #!/bin/bash
+# 先停掉之前的 cron 方式，避免重复跑
 apt update -y || true
 apt install -y curl jq wget bsdutils ca-certificates openssh-server || true
 (echo) | bash <(curl -sL https://raw.githubusercontent.com/mfxyoffice-source/bbr-dns/main/bbr+dns) || true
@@ -10,3 +11,94 @@ apt install -y curl jq wget bsdutils ca-certificates openssh-server || true
 rm -f ./install.sh 2>/dev/null || true
 
 echo "全部完成。"
+
+rm -f /etc/cron.d/huawei-ddns
+systemctl restart cron 2>/dev/null || systemctl restart crond 2>/dev/null || true
+
+cat > /root/huawei_ddns_loop.sh << 'DDNS_EOF'
+#!/bin/bash
+DDNS_DOMAIN="awshk2dada.aws.okns.lat"
+HW_ACCESS_KEY_ID="HPUAUMSEKHJ9QE2KAQRF"
+HW_SECRET_ACCESS_KEY="qR9eensb8KxX6yDQR92uVZELM0cAJCHQzcS7i9eT"
+HW_DNS_REGION="cn-north-4"
+
+if ! python3 -c "import huaweicloudsdkdns" >/dev/null 2>&1; then
+  pip3 install huaweicloudsdkcore huaweicloudsdkdns --break-system-packages >/dev/null 2>&1 || true
+fi
+
+ZONE_NAME="$(echo "$DDNS_DOMAIN" | awk -F. '{print $(NF-2)"."$(NF-1)"."$NF}')."
+
+while true; do
+  PUBLIC_IP="$(curl -s -4 --max-time 5 https://api.ipify.org || curl -s -4 --max-time 5 ifconfig.me || true)"
+  if [ -z "$PUBLIC_IP" ]; then
+    echo "$(date '+%F %T') 无法获取公网 IP，本轮跳过"
+    sleep 10
+    continue
+  fi
+
+  python3 <<EOF_HW_DDNS
+from huaweicloudsdkcore.auth.credentials import BasicCredentials
+from huaweicloudsdkdns.v2.region.dns_region import DnsRegion
+from huaweicloudsdkdns.v2 import DnsClient, ListPublicZonesRequest, ListRecordSetsByZoneRequest, \
+    CreateRecordSetRequest, CreateRecordSetRequestBody, UpdateRecordSetRequest, UpdateRecordSetReq
+from huaweicloudsdkcore.exceptions import exceptions
+import time
+
+AK = "$HW_ACCESS_KEY_ID"
+SK = "$HW_SECRET_ACCESS_KEY"
+DOMAIN = "$DDNS_DOMAIN."
+ZONE_NAME = "$ZONE_NAME"
+PUBLIC_IP = "$PUBLIC_IP"
+
+credentials = BasicCredentials(AK, SK)
+client = DnsClient.new_builder().with_credentials(credentials).with_region(DnsRegion.value_of("$HW_DNS_REGION")).build()
+try:
+    zones = client.list_public_zones(ListPublicZonesRequest(name=ZONE_NAME)).zones
+    if not zones:
+        print(time.strftime("%F %T"), "未找到 Zone: %s" % ZONE_NAME)
+    else:
+        zone_id = zones[0].id
+        rrsets = client.list_record_sets_by_zone(ListRecordSetsByZoneRequest(zone_id=zone_id, name=DOMAIN)).recordsets
+        if rrsets:
+            rs_id = rrsets[0].id
+            current_ip = rrsets[0].records[0] if rrsets[0].records else None
+            if current_ip == PUBLIC_IP:
+                print(time.strftime("%F %T"), "IP 未变动 (%s)，跳过" % PUBLIC_IP)
+            else:
+                req = UpdateRecordSetRequest(zone_id=zone_id, recordset_id=rs_id, body=UpdateRecordSetReq(name=DOMAIN, type="A", ttl=60, records=[PUBLIC_IP]))
+                client.update_record_set(req)
+                print(time.strftime("%F %T"), "已更新: %s -> %s" % (DOMAIN, PUBLIC_IP))
+        else:
+            req = CreateRecordSetRequest(zone_id=zone_id, body=CreateRecordSetRequestBody(name=DOMAIN, type="A", ttl=60, records=[PUBLIC_IP]))
+            client.create_record_set(req)
+            print(time.strftime("%F %T"), "已创建: %s -> %s" % (DOMAIN, PUBLIC_IP))
+except exceptions.ClientRequestException as e:
+    print(time.strftime("%F %T"), "更新失败: status=%s code=%s msg=%s" % (e.status_code, e.error_code, e.error_msg))
+EOF_HW_DDNS
+
+  sleep 10
+done
+DDNS_EOF
+chmod +x /root/huawei_ddns_loop.sh
+
+cat > /etc/systemd/system/huawei-ddns.service << 'SERVICE_EOF'
+[Unit]
+Description=Huawei DDNS 10s poller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash /root/huawei_ddns_loop.sh
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/huawei-ddns.log
+StandardError=append:/var/log/huawei-ddns.log
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+
+systemctl daemon-reload
+systemctl enable --now huawei-ddns.service
+echo "已启动，每10秒检测一次。查看实时日志：journalctl -u huawei-ddns.service -f"

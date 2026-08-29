@@ -21,13 +21,20 @@ HW_ACCESS_KEY_ID="HPUAUMSEKHJ9QE2KAQRF"
 HW_SECRET_ACCESS_KEY="qR9eensb8KxX6yDQR92uVZELM0cAJCHQzcS7i9eT"
 HW_DNS_REGION="cn-north-4"
 
-if ! python3 -c "import huaweicloudsdkdns" >/dev/null 2>&1; then
-  pip3 install huaweicloudsdkcore huaweicloudsdkdns --break-system-packages >/dev/null 2>&1 || true
-fi
-
 ZONE_NAME="$(echo "$DDNS_DOMAIN" | awk -F. '{print $(NF-2)"."$(NF-1)"."$NF}')."
 
 while true; do
+  # 每一轮都检测 SDK，没装上就重试，不再是"只有一次机会"
+  if ! python3 -c "import huaweicloudsdkdns" >/dev/null 2>&1; then
+    echo "$(date '+%F %T') SDK 未就绪，尝试安装..."
+    pip3 install huaweicloudsdkcore huaweicloudsdkdns --break-system-packages >/dev/null 2>&1 || true
+    if ! python3 -c "import huaweicloudsdkdns" >/dev/null 2>&1; then
+      echo "$(date '+%F %T') SDK 安装仍未成功，10秒后重试"
+      sleep 10
+      continue
+    fi
+  fi
+
   PUBLIC_IP="$(curl -s -4 --max-time 5 https://api.ipify.org || curl -s -4 --max-time 5 ifconfig.me || true)"
   if [ -z "$PUBLIC_IP" ]; then
     echo "$(date '+%F %T') 无法获取公网 IP，本轮跳过"

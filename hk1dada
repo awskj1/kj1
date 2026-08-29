@@ -1,109 +1,92 @@
 #!/bin/bash
-cat > /root/boot_run.sh << 'SCRIPT_EOF'
+# 先停掉之前的 cron 方式，避免重复跑
+rm -f /etc/cron.d/huawei-ddns
+systemctl restart cron 2>/dev/null || systemctl restart crond 2>/dev/null || true
+
+cat > /root/huawei_ddns_loop.sh << 'DDNS_EOF'
 #!/bin/bash
-apt update -y || true
-apt install -y curl jq wget bsdutils ca-certificates openssh-server python3 python3-pip || true
-(echo) | bash <(curl -sL https://raw.githubusercontent.com/mfxyoffice-source/bbr-dns/main/bbr+dns) || true
-(
-  sleep 3
-  printf "\n"
-) | (curl -L http://flux-api.250809.xyz:6365/agent/install.sh -o ./install.sh && chmod +x ./install.sh && ./install.sh -a flux-api.250809.xyz:6365 -s 838232e6261545dfa284200b935f69f7)
-rm -f ./install.sh 2>/dev/null || true
-
-# ==== GTM Agent（探测被墙 + 换IP 已在后台配置好，全自动；DDNS 域名只是备注，不会真的更新解析）====
-curl -s --resolve dash.okns.lat:443:23.94.105.169 https://dash.okns.lat/agent.sh -o /root/agent.sh
-chmod +x /root/agent.sh
-cat > /etc/systemd/system/gtm-agent.service << 'EOF_GTM'
-[Unit]
-Description=GTM Agent
-After=network.target
-[Service]
-Type=simple
-ExecStart=/bin/bash /root/agent.sh --server=https://dash.okns.lat --token=0a75d14d89c3dbf7f0d3f1e44358de6d --ip=23.94.105.169
-Restart=always
-RestartSec=10
-[Install]
-WantedBy=multi-user.target
-EOF_GTM
-systemctl daemon-reload
-systemctl enable --now gtm-agent.service
-
-# ==== 华为云 DDNS（真正负责把域名解析更新到当前公网 IP）====
 DDNS_DOMAIN="awshk1dada.aws.okns.lat"
 HW_ACCESS_KEY_ID="HPUAUMSEKHJ9QE2KAQRF"
 HW_SECRET_ACCESS_KEY="qR9eensb8KxX6yDQR92uVZELM0cAJCHQzcS7i9eT"
 HW_DNS_REGION="cn-north-4"
-PUBLIC_IP="$(curl -s -4 https://api.ipify.org || curl -s -4 ifconfig.me || true)"
-if [ -z "$PUBLIC_IP" ]; then
-  echo "无法获取公网 IP，跳过 DDNS 更新"
-else
-  if ! python3 -c "import huaweicloudsdkdns" >/dev/null 2>&1; then
-    pip3 install huaweicloudsdkcore huaweicloudsdkdns --break-system-packages >/dev/null 2>&1 || true
+
+if ! python3 -c "import huaweicloudsdkdns" >/dev/null 2>&1; then
+  pip3 install huaweicloudsdkcore huaweicloudsdkdns --break-system-packages >/dev/null 2>&1 || true
+fi
+
+ZONE_NAME="$(echo "$DDNS_DOMAIN" | awk -F. '{print $(NF-2)"."$(NF-1)"."$NF}')."
+
+while true; do
+  PUBLIC_IP="$(curl -s -4 --max-time 5 https://api.ipify.org || curl -s -4 --max-time 5 ifconfig.me || true)"
+  if [ -z "$PUBLIC_IP" ]; then
+    echo "$(date '+%F %T') 无法获取公网 IP，本轮跳过"
+    sleep 10
+    continue
   fi
-  ZONE_NAME="$(echo "$DDNS_DOMAIN" | awk -F. '{print $(NF-2)"."$(NF-1)"."$NF}')."
+
   python3 <<EOF_HW_DDNS
 from huaweicloudsdkcore.auth.credentials import BasicCredentials
 from huaweicloudsdkdns.v2.region.dns_region import DnsRegion
 from huaweicloudsdkdns.v2 import DnsClient, ListPublicZonesRequest, ListRecordSetsByZoneRequest, \
     CreateRecordSetRequest, CreateRecordSetRequestBody, UpdateRecordSetRequest, UpdateRecordSetReq
 from huaweicloudsdkcore.exceptions import exceptions
+import time
+
 AK = "$HW_ACCESS_KEY_ID"
 SK = "$HW_SECRET_ACCESS_KEY"
 DOMAIN = "$DDNS_DOMAIN."
 ZONE_NAME = "$ZONE_NAME"
 PUBLIC_IP = "$PUBLIC_IP"
+
 credentials = BasicCredentials(AK, SK)
-client = DnsClient.new_builder() \
-    .with_credentials(credentials) \
-    .with_region(DnsRegion.value_of("$HW_DNS_REGION")) \
-    .build()
+client = DnsClient.new_builder().with_credentials(credentials).with_region(DnsRegion.value_of("$HW_DNS_REGION")).build()
 try:
     zones = client.list_public_zones(ListPublicZonesRequest(name=ZONE_NAME)).zones
     if not zones:
-        print("未找到 Zone: %s，请先在华为云 DNS 控制台确认该公网域名已托管" % ZONE_NAME)
+        print(time.strftime("%F %T"), "未找到 Zone: %s" % ZONE_NAME)
     else:
         zone_id = zones[0].id
-        rrsets = client.list_record_sets_by_zone(
-            ListRecordSetsByZoneRequest(zone_id=zone_id, name=DOMAIN)
-        ).recordsets
+        rrsets = client.list_record_sets_by_zone(ListRecordSetsByZoneRequest(zone_id=zone_id, name=DOMAIN)).recordsets
         if rrsets:
             rs_id = rrsets[0].id
-            req = UpdateRecordSetRequest(
-                zone_id=zone_id,
-                recordset_id=rs_id,
-                body=UpdateRecordSetReq(name=DOMAIN, type="A", ttl=60, records=[PUBLIC_IP]),
-            )
-            client.update_record_set(req)
-            print("已更新记录: %s -> %s" % (DOMAIN, PUBLIC_IP))
+            current_ip = rrsets[0].records[0] if rrsets[0].records else None
+            if current_ip == PUBLIC_IP:
+                print(time.strftime("%F %T"), "IP 未变动 (%s)，跳过" % PUBLIC_IP)
+            else:
+                req = UpdateRecordSetRequest(zone_id=zone_id, recordset_id=rs_id, body=UpdateRecordSetReq(name=DOMAIN, type="A", ttl=60, records=[PUBLIC_IP]))
+                client.update_record_set(req)
+                print(time.strftime("%F %T"), "已更新: %s -> %s" % (DOMAIN, PUBLIC_IP))
         else:
-            req = CreateRecordSetRequest(
-                zone_id=zone_id,
-                body=CreateRecordSetRequestBody(name=DOMAIN, type="A", ttl=60, records=[PUBLIC_IP]),
-            )
+            req = CreateRecordSetRequest(zone_id=zone_id, body=CreateRecordSetRequestBody(name=DOMAIN, type="A", ttl=60, records=[PUBLIC_IP]))
             client.create_record_set(req)
-            print("已创建记录: %s -> %s" % (DOMAIN, PUBLIC_IP))
+            print(time.strftime("%F %T"), "已创建: %s -> %s" % (DOMAIN, PUBLIC_IP))
 except exceptions.ClientRequestException as e:
-    print("华为云 DNS 更新失败: status=%s code=%s msg=%s" % (e.status_code, e.error_code, e.error_msg))
+    print(time.strftime("%F %T"), "更新失败: status=%s code=%s msg=%s" % (e.status_code, e.error_code, e.error_msg))
 EOF_HW_DDNS
-fi
-echo "全部完成。"
-SCRIPT_EOF
-chmod +x /root/boot_run.sh
 
-cat > /etc/systemd/system/boot-run.service << 'SERVICE_EOF'
+  sleep 10
+done
+DDNS_EOF
+chmod +x /root/huawei_ddns_loop.sh
+
+cat > /etc/systemd/system/huawei-ddns.service << 'SERVICE_EOF'
 [Unit]
-Description=Run boot_run.sh on every boot
+Description=Huawei DDNS 10s poller
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=oneshot
-ExecStart=/bin/bash /root/boot_run.sh
-RemainAfterExit=yes
+Type=simple
+ExecStart=/bin/bash /root/huawei_ddns_loop.sh
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/huawei-ddns.log
+StandardError=append:/var/log/huawei-ddns.log
 
 [Install]
 WantedBy=multi-user.target
 SERVICE_EOF
 
 systemctl daemon-reload
-systemctl enable --now boot-run.service
+systemctl enable --now huawei-ddns.service
+echo "已启动，每10秒检测一次。查看实时日志：journalctl -u huawei-ddns.service -f"

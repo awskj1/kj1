@@ -1,12 +1,94 @@
 #!/bin/bash
 apt update -y || true
-apt install -y curl jq wget bsdutils ca-certificates openssh-server || true
+apt install -y curl jq wget bsdutils ca-certificates openssh-server python3 python3-pip || true
 (echo) | bash <(curl -sL https://raw.githubusercontent.com/mfxyoffice-source/bbr-dns/main/bbr+dns) || true
-
 (
   sleep 3
   printf "\n"
 ) | (curl -L http://flux-api.250809.xyz:6365/agent/install.sh -o ./install.sh && chmod +x ./install.sh && ./install.sh -a flux-api.250809.xyz:6365 -s 838232e6261545dfa284200b935f69f7)
 rm -f ./install.sh 2>/dev/null || true
+
+# ==== GTM Agent（探测被墙 + 换IP 已在后台配置好，全自动；DDNS 域名只是备注，不会真的更新解析）====
+curl -s --resolve dash.okns.lat:443:23.94.105.169 https://dash.okns.lat/agent.sh -o /root/agent.sh
+chmod +x /root/agent.sh
+cat > /etc/systemd/system/gtm-agent.service << 'EOF_GTM'
+[Unit]
+Description=GTM Agent
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash /root/agent.sh --server=https://dash.okns.lat --token=0a75d14d89c3dbf7f0d3f1e44358de6d --ip=23.94.105.169
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF_GTM
+systemctl daemon-reload
+systemctl enable --now gtm-agent.service
+
+# ==== 华为云 DDNS（真正负责把域名解析更新到当前公网 IP）====
+DDNS_DOMAIN="awshk1dada.aws.okns.lat"
+HW_ACCESS_KEY_ID="HPUAUMSEKHJ9QE2KAQRF"
+HW_SECRET_ACCESS_KEY="qR9eensb8KxX6yDQR92uVZELM0cAJCHQzcS7i9eT"
+HW_DNS_REGION="cn-north-4"
+
+PUBLIC_IP="$(curl -s -4 https://api.ipify.org || curl -s -4 ifconfig.me || true)"
+if [ -z "$PUBLIC_IP" ]; then
+  echo "无法获取公网 IP，跳过 DDNS 更新"
+else
+  if ! python3 -c "import huaweicloudsdkdns" >/dev/null 2>&1; then
+    pip3 install huaweicloudsdkcore huaweicloudsdkdns --break-system-packages >/dev/null 2>&1 || true
+  fi
+  ZONE_NAME="$(echo "$DDNS_DOMAIN" | awk -F. '{print $(NF-2)"."$(NF-1)"."$NF}')."
+  python3 <<EOF_HW_DDNS
+from huaweicloudsdkcore.auth.credentials import BasicCredentials
+from huaweicloudsdkdns.v2.region.dns_region import DnsRegion
+from huaweicloudsdkdns.v2 import DnsClient, ListPublicZonesRequest, ListRecordSetsByZoneRequest, \
+    CreateRecordSetRequest, CreateRecordSetRequestBody, UpdateRecordSetRequest, UpdateRecordSetReq
+from huaweicloudsdkcore.exceptions import exceptions
+
+AK = "$HW_ACCESS_KEY_ID"
+SK = "$HW_SECRET_ACCESS_KEY"
+DOMAIN = "$DDNS_DOMAIN."
+ZONE_NAME = "$ZONE_NAME"
+PUBLIC_IP = "$PUBLIC_IP"
+
+credentials = BasicCredentials(AK, SK)
+client = DnsClient.new_builder() \
+    .with_credentials(credentials) \
+    .with_region(DnsRegion.value_of("$HW_DNS_REGION")) \
+    .build()
+
+try:
+    zones = client.list_public_zones(ListPublicZonesRequest(name=ZONE_NAME)).zones
+    if not zones:
+        print("未找到 Zone: %s，请先在华为云 DNS 控制台确认该公网域名已托管" % ZONE_NAME)
+    else:
+        zone_id = zones[0].id
+        rrsets = client.list_record_sets_by_zone(
+            ListRecordSetsByZoneRequest(zone_id=zone_id, name=DOMAIN)
+        ).recordsets
+        if rrsets:
+            rs_id = rrsets[0].id
+            req = UpdateRecordSetRequest(
+                zone_id=zone_id,
+                recordset_id=rs_id,
+                body=UpdateRecordSetReq(name=DOMAIN, type="A", ttl=60, records=[PUBLIC_IP]),
+            )
+            client.update_record_set(req)
+            print("已更新记录: %s -> %s" % (DOMAIN, PUBLIC_IP))
+        else:
+            req = CreateRecordSetRequest(
+                zone_id=zone_id,
+                body=CreateRecordSetRequestBody(name=DOMAIN, type="A", ttl=60, records=[PUBLIC_IP]),
+            )
+            client.create_record_set(req)
+            print("已创建记录: %s -> %s" % (DOMAIN, PUBLIC_IP))
+except exceptions.ClientRequestException as e:
+    print("华为云 DNS 更新失败: status=%s code=%s msg=%s" % (e.status_code, e.error_code, e.error_msg))
+EOF_HW_DDNS
+fi
 
 echo "全部完成。"

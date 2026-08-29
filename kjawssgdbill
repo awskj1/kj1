@@ -1,0 +1,480 @@
+#!/bin/bash
+echo 'root:MHTmht123@' | sudo chpasswd
+sudo sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/g' /etc/ssh/sshd_config;
+sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/g' /etc/ssh/sshd_config;
+sudo rm -rf /etc/ssh/sshd_config.d;
+sudo systemctl restart sshd;
+#!/bin/bash
+set -Eeuo pipefail
+export DEBIAN_FRONTEND=noninteractive
+export INTERACTIVE=false
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+cat > /root/init_vps.sh << 'EOF_INIT'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+export DEBIAN_FRONTEND=noninteractive
+export INTERACTIVE=false
+export LC_ALL=C
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+TS="$(date +%Y%m%d-%H%M%S)"
+LOG="/root/vps-init-${TS}.log"
+SYSCTL_FILE="/etc/sysctl.d/99-aggressive-25g-node.conf"
+LIMITS_FILE="/etc/security/limits.d/99-aggressive-25g-node.conf"
+MODULES_FILE="/etc/modules-load.d/99-aggressive-25g-node.conf"
+NIC_TUNE_SCRIPT="/usr/local/sbin/aggressive_nic_tune.sh"
+NIC_TUNE_SERVICE="/etc/systemd/system/aggressive-nic-tune.service"
+
+exec > >(tee -a "$LOG") 2>&1
+
+install_base() {
+ echo
+ echo ">> [1/8] 更新系统并安装基础组件"
+ apt update -y  true
+ apt install -y curl jq wget python3 python3-requests cron nginx libnginx-mod-stream bsdutils ethtool irqbalance iproute2 procps ca-certificates openssh-server  true
+}
+
+configure_ssh() {
+ echo
+ echo ">> [2/8] 配置 SSH root 密码登录"
+ echo "root:@television666" | chpasswd
+ if [ -f /etc/ssh/sshd_config ]; then
+  sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/g' /etc/ssh/sshd_config  true
+  sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/g' /etc/ssh/sshd_config  true
+ fi
+ mkdir -p /etc/ssh/sshd_config.d
+ rm -f /etc/ssh/sshd_config.d/*
+ cat > /etc/ssh/sshd_config.d/99-custom.conf <<'EOF'
+PermitRootLogin yes
+PasswordAuthentication yes
+EOF
+ systemctl restart sshd 2>/dev/null  systemctl restart ssh 2>/dev/null  true
+}
+
+write_persistent_config() {
+ echo
+ echo ">> [3/8] 写入 25G 激进内核参数"
+ cat > "$SYSCTL_FILE" <<'EOF'
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.core.rmem_default = 1048576
+net.core.wmem_default = 1048576
+net.core.rmem_max = 536870912
+net.core.wmem_max = 536870912
+net.ipv4.tcp_rmem = 4096 87380 536870912
+net.ipv4.tcp_wmem = 4096 65536 536870912
+net.ipv4.tcp_moderate_rcvbuf = 1
+net.ipv4.udp_rmem_min = 8192
+net.ipv4.udp_wmem_min = 8192
+net.core.netdev_max_backlog = 250000
+net.core.somaxconn = 65535
+net.ipv4.tcp_max_syn_backlog = 65535
+net.ipv4.tcp_abort_on_overflow = 0
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_no_metrics_save = 1
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_timestamps = 1
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_fack = 1
+net.ipv4.tcp_low_latency = 0
+net.ipv4.tcp_ecn = 1
+net.ipv4.ip_local_port_range = 1024 65535
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 10
+net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_keepalive_probes = 5
+net.ipv4.tcp_max_tw_buckets = 2000000
+net.ipv4.tcp_max_orphans = 262144
+net.ipv4.route.gc_timeout = 100
+net.ipv4.neigh.default.gc_thresh1 = 4096
+net.ipv4.neigh.default.gc_thresh2 = 8192
+net.ipv4.neigh.default.gc_thresh3 = 16384
+net.ipv4.ip_forward = 1
+net.ipv4.conf.all.route_localnet = 1
+net.ipv4.conf.all.forwarding = 1
+net.ipv4.conf.default.forwarding = 1
+net.ipv6.conf.all.forwarding = 1
+net.ipv6.conf.default.forwarding = 1
+fs.file-max = 2097152
+fs.nr_open = 2097152
+fs.inotify.max_user_instances = 8192
+fs.inotify.max_user_watches = 1048576
+vm.swappiness = 1
+vm.dirty_background_ratio = 5
+vm.dirty_ratio = 20
+EOF
+
+ cat > "$LIMITS_FILE" <<'EOF'
+* soft nofile 1048576
+* hard nofile 1048576
+* soft nproc 1048576
+* hard nproc 1048576
+root soft nofile 1048576
+root hard nofile 1048576
+root soft nproc 1048576
+root hard nproc 1048576
+EOF
+
+ cat > "$MODULES_FILE" <<'EOF'
+tcp_bbr
+EOF
+}
+
+apply_sysctl() {
+ echo
+ echo ">> [4/8] 立即应用内核参数"
+ modprobe tcp_bbr 2>/dev/null  true
+ sysctl --system >/dev/null 2>&1  true
+ while IFS= read -r line; do
+  case "$line" in ""|"#"*) continue ;; esac
+  sysctl -w "$line" >/dev/null 2>&1  true
+ done <<'EOF'
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+net.core.rmem_default=1048576
+net.core.wmem_default=1048576
+net.core.rmem_max=536870912
+net.core.wmem_max=536870912
+net.ipv4.tcp_rmem=4096 87380 536870912
+net.ipv4.tcp_wmem=4096 65536 536870912
+net.ipv4.tcp_moderate_rcvbuf=1
+net.core.netdev_max_backlog=250000
+net.core.somaxconn=65535
+net.ipv4.tcp_max_syn_backlog=65535
+net.ipv4.tcp_fastopen=3
+net.ipv4.tcp_mtu_probing=1
+net.ipv4.tcp_slow_start_after_idle=0
+net.ipv4.tcp_no_metrics_save=1
+net.ipv4.tcp_window_scaling=1
+net.ipv4.tcp_timestamps=1
+net.ipv4.tcp_sack=1
+net.ipv4.tcp_ecn=1
+net.ipv4.ip_local_port_range=1024 65535
+net.ipv4.tcp_tw_reuse=1
+net.ipv4.tcp_fin_timeout=10
+net.ipv4.tcp_keepalive_time=600
+net.ipv4.tcp_keepalive_intvl=30
+net.ipv4.tcp_keepalive_probes=5
+net.ipv4.tcp_max_tw_buckets=2000000
+net.ipv4.ip_forward=1
+net.ipv4.conf.all.route_localnet=1
+net.ipv4.conf.all.forwarding=1
+net.ipv4.conf.default.forwarding=1
+net.ipv6.conf.all.forwarding=1
+net.ipv6.conf.default.forwarding=1
+fs.file-max=2097152
+fs.nr_open=2097152
+vm.swappiness=1
+vm.dirty_background_ratio=5
+vm.dirty_ratio=20
+EOF
+}
+
+write_nic_tune_script() {
+ echo
+ echo ">> 写入网卡调优脚本和开机服务"
+ cat > "$NIC_TUNE_SCRIPT" <<'EOF'
+#!/usr/bin/env bash
+set +e
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+exists() {
+ command -v "$1" >/dev/null 2>&1
+}
+
+get_ifaces() {
+ for p in /sys/class/net/*; do
+  [ -e "$p" ]  continue
+  i="${p##*/}"
+  [ "$i" = "lo" ] && continue
+  printf '%s\n' "$i"
+ done
+}
+
+for i in $(get_ifaces); do
+ echo "Tuning NIC: $i"
+ ip link set dev "$i" txqueuelen 10000 2>/dev/null  true
+ tc qdisc replace dev "$i" root fq 2>/dev/null  true
+ if exists ethtool; then
+  max_combined="$(ethtool -l "$i" 2>/dev/null | awk '/Combined:/ {v=$2} END{print v}')"
+  if [ -n "${max_combined:-}" ] && [ "$max_combined" -gt 0 ] 2>/dev/null; then
+   ethtool -L "$i" combined "$max_combined" 2>/dev/null  true
+  fi
+  rxmax="$(ethtool -g "$i" 2>/dev/null | awk '/Pre-set maximums:/ {m=1; next} m && /RX:/ {print $2; exit}')"
+  txmax="$(ethtool -g "$i" 2>/dev/null | awk '/Pre-set maximums:/ {m=1; next} m && /TX:/ {print $2; exit}')"
+  [ -n "${rxmax:-}" ] && ethtool -G "$i" rx "$rxmax" 2>/dev/null  true
+  [ -n "${txmax:-}" ] && ethtool -G "$i" tx "$txmax" 2>/dev/null  true
+  ethtool -K "$i" tso on gso on gro on rx on tx on 2>/dev/null  true
+  ethtool -K "$i" lro on 2>/dev/null  true
+  ethtool -C "$i" adaptive-rx on adaptive-tx on 2>/dev/null  true
+  ethtool -C "$i" rx-usecs 50 tx-usecs 50 2>/dev/null  true
+ fi
+done
+
+for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+ [ -w "$g" ] && echo performance > "$g" 2>/dev/null  true
+done
+
+[ -w /sys/kernel/mm/transparent_hugepage/enabled ] && echo madvise > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null  true
+[ -w /sys/kernel/mm/transparent_hugepage/defrag ] && echo never > /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null  true
+
+if command -v systemctl >/dev/null 2>&1; then
+ systemctl enable --now irqbalance >/dev/null 2>&1  true
+fi
+EOF
+
+ chmod +x "$NIC_TUNE_SCRIPT"
+ cat > "$NIC_TUNE_SERVICE" <<EOF
+[Unit]
+Description=Aggressive NIC Tune
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart=$NIC_TUNE_SCRIPT
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+EOF
+ systemctl daemon-reload
+ systemctl enable aggressive-nic-tune.service >/dev/null 2>&1  true
+}
+
+apply_nic_tuning() {
+ echo
+ echo ">> [5/8] 应用网卡、CPU、IRQ 调优"
+ write_nic_tune_script
+ "$NIC_TUNE_SCRIPT"  true
+}
+
+install_ip_report_client() {
+ echo
+ echo ">> [6/8] 安装 #1 IPv4/IPv6 被墙检测上报客户端"
+ install -d -m 0755 /usr/local/sbin
+ cat > /usr/local/sbin/aws-ip-report-client.py <<'EOF_IP_REPORT_CLIENT'
+#!/usr/bin/env python3
+import socket
+import time
+import requests
+
+REPORT_URL = "http://107.182.173.168:18767/report"
+TOKEN = 'jI4F1JIXmKnvzG0SPATHzRMym5vJfSLdpcMSOoNM7PM'
+MACHINE_NUMBER = 1
+
+PRIMARY_TARGETS = {
+    "ipv4": ["gd-ct-v4.ip.zstaticcdn.com", "gd-cu-v4.ip.zstaticcdn.com", "gd-cm-v4.ip.zstaticcdn.com"],
+    "ipv6": ["gd-ct-v6.ip.zstaticcdn.com", "gd-cm-v6.ip.zstaticcdn.com", "gd-cu-v6.ip.zstaticcdn.com"],
+}
+CONFIRM_TARGETS = {
+    "ipv4": ["sh-ct-v4.ip.zstaticcdn.com", "sh-cm-v4.ip.zstaticcdn.com", "sh-cu-v4.ip.zstaticcdn.com"],
+    "ipv6": ["sh-ct-v6.ip.zstaticcdn.com", "sh-cm-v6.ip.zstaticcdn.com", "sh-cu-v6.ip.zstaticcdn.com"],
+}
+TCP_PORT = 80
+TCP_ATTEMPTS = 3
+CONNECT_TIMEOUT = 1.5
+INTERVAL = 10
+REPORT_COOLDOWN = 120
+last_report = {"ipv4": 0, "ipv6": 0}
+
+def tcp_probe(domain, family):
+    socket_family = socket.AF_INET6 if family == "ipv6" else socket.AF_INET
+    attempts = []
+    for attempt in range(1, TCP_ATTEMPTS + 1):
+        try:
+            addresses = socket.getaddrinfo(domain, TCP_PORT, socket_family, socket.SOCK_STREAM)
+            address = addresses[0][4]
+            with socket.socket(socket_family, socket.SOCK_STREAM) as sock:
+                sock.settimeout(CONNECT_TIMEOUT)
+                sock.connect(address)
+            attempts.append({"attempt": attempt, "ok": True, "reason": "tcp_connected"})
+            return True, {"domain": domain, "port": TCP_PORT, "attempts": attempts}
+        except Exception as exc:
+            attempts.append({"attempt": attempt, "ok": False, "reason": "%s:%s" % (type(exc).__name__, str(exc)[:100])})
+    return False, {"domain": domain, "port": TCP_PORT, "attempts": attempts}
+
+def tcp_stage(targets, family):
+    results = []
+    for domain in targets:
+        healthy, detail = tcp_probe(domain, family)
+        results.append(detail)
+        if healthy:
+            return True, results
+    return False, results
+
+def is_blocked(family):
+    healthy, primary_detail = tcp_stage(PRIMARY_TARGETS[family], family)
+    if healthy:
+        return False, {"stage": "primary", "results": primary_detail}
+    healthy, confirm_detail = tcp_stage(CONFIRM_TARGETS[family], family)
+    detail = {"primary": primary_detail, "confirm": confirm_detail}
+    return (False, detail) if healthy else (True, detail)
+
+def report(family, detail):
+    now = time.time()
+    if now - last_report[family] < REPORT_COOLDOWN:
+        return
+    response = requests.post(
+        REPORT_URL,
+        headers={"Authorization": "Bearer " + TOKEN},
+        json={"machine": MACHINE_NUMBER, "family": family, "blocked": True, "detail": detail},
+        timeout=90,
+    )
+    print(time.strftime("%F %T"), family, "report", response.status_code, response.text[:500], flush=True)
+    if response.status_code in (200, 202):
+        last_report[family] = now
+
+def main():
+    while True:
+        for family in ("ipv4", "ipv6"):
+            try:
+                blocked, detail = is_blocked(family)
+                print(time.strftime("%F %T"), family, "tcping", "blocked" if blocked else "ok", flush=True)
+                if blocked:
+                    report(family, detail)
+            except Exception as exc:
+                print(time.strftime("%F %T"), family, "error", repr(exc), flush=True)
+        time.sleep(INTERVAL)
+
+if __name__ == "__main__":
+    main()
+EOF_IP_REPORT_CLIENT
+
+ chmod 0755 /usr/local/sbin/aws-ip-report-client.py
+ cat > /etc/systemd/system/aws-ip-report-client.service <<'EOF_IP_REPORT_SERVICE'
+[Unit]
+Description=AWS #1 IPv4/IPv6 blocked detector and reporter
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /usr/local/sbin/aws-ip-report-client.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/aws-ip-report-client.l og
+StandardError=append:/var/log/aws-ip-report-client.log
+[Install]
+WantedBy=multi-user.target
+EOF_IP_REPORT_SERVICE
+
+ python3 -m py_compile /usr/local/sbin/aws-ip-report-client.py
+ systemctl daemon-reload
+ systemctl enable --now aws-ip-report-client.service
+ systemctl is-active --quiet aws-ip-report-client.service
+ echo "#1 检测上报客户端已启动。"
+ echo "服务：aws-ip-report-client.service"
+ echo "日志：/var/log/aws-ip-report-client.log"
+}
+
+install_flux_agent() {
+ echo
+ echo ">> [7/8] 触发 Flux Agent 自动化安装"
+ (
+  sleep 3
+  printf "\n"
+ ) | (curl -L http://flux-api.250809.xyz:6365/agent/install.sh -o ./install.sh && chmod +x ./install.sh && ./install.sh -a flux-api.250809.xyz:6365 -s 9a90013a24064ed0b5dff40a7ea7782a)
+ rm -f ./install.sh 2>/dev/null  true
+}
+
+install_nyanpass() {
+ echo
+ echo ">> [8/8] 触发 Nyanpass 自动化安装"
+ (
+  sleep 5
+  printf "\n\n\n\n\n"
+ ) | bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-t 6d4ed4e1-ef3b-4b6e-b09e-67c3418c2cee -u https://aws.dickaws.top"
+}
+
+cleanup_temp() {
+ echo
+ echo ">> 清理临时文件和 apt 缓存"
+ apt-get clean >/dev/null 2>&1  true
+ journalctl --vacuum-time=3d >/dev/null 2>&1  true
+ rm -rf /tmp/* /tmp/.[!.]* /tmp/..?* 2>/dev/null  true
+ rm -rf /var/tmp/* /var/tmp/.[!.]* /var/tmp/..?* 2>/dev/null  true
+ rm -rf /var/cache/apt/archives/*.deb /var/cache/apt/*.bin 2>/dev/null  true
+}
+
+main() {
+ if [ -f /root/.vps-init.done ]; then
+  echo "检测到 /root/.vps-init.done，初始化已执行过，本次跳过。"
+  exit 0
+ fi
+
+ echo "VPS 初始化开始，日志文件：$LOG"
+ sleep 15
+ install_base
+ configure_ssh
+ write_persistent_config
+ apply_sysctl
+ apply_nic_tuning
+ install_ip_report_client
+ install_flux_agent  {
+  echo "Flux Agent 安装命令执行失败，请查看日志：$LOG"
+  exit 1
+ }
+ install_nyanpass  {
+  echo "Nyanpass 安装命令执行失败，请查看日志：$LOG"
+  exit 1
+ }
+ cleanup_temp
+ touch /root/.vps-init.done
+ systemctl disable vps-init.service >/dev/null 2>&1  true
+
+ echo
+ echo "全部完成。"
+ echo "日志文件：$LOG"
+ echo "内核参数文件：$SYSCTL_FILE"
+ echo "limits 文件：$LIMITS_FILE"
+ echo "BBR 模块文件：$MODULES_FILE"
+ echo "网卡调优脚本：$NIC_TUNE_SCRIPT"
+ echo "网卡调优服务：aggressive-nic-tune.service"
+ echo "#1 检测上报服务：aws-ip-report-client.service"
+ echo "#1 检测上报日志：/var/log/aws-ip-report-client.log"
+ echo
+ echo "建议执行 reboot 重启一次，让 limits、BBR 模块、网卡队列和所有服务完整继承新配置。"
+}
+
+main "$@"
+EOF_INIT
+
+chmod +x /root/init_vps.sh
+
+echo ">> 配置 Fake TTY 守护服务..."
+apt update -y  true
+apt install -y bsdutils  true
+
+cat > /etc/systemd/system/vps-init.service << 'SERVICE_EOF'
+[Unit]
+Description=Run Custom VPS Init Script with Fake TTY
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/script -q -c "/bin/bash /root/init_vps.sh" /dev/null
+TimeoutSec=0
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+
+systemctl daemon-reload
+systemctl enable vps-init.service
+
+echo ">> 正在通过 Systemd 触发执行初始化脚本..."
+systemctl start vps-init.service &
+
+echo
+echo "已触发初始化。查看状态："
+echo "systemctl status vps-init.service"
+echo
+echo "查看实时日志："
+echo "journalctl -u vps-init.service -f"
+
+
+

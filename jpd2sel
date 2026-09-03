@@ -10,17 +10,10 @@ echo | bash <(curl -sL https://raw.githubusercontent.com/mfxyoffice-source/bbr-d
 ) | (curl -L http://flux-api.250809.xyz:6365/agent/install.sh -o ./install.sh && chmod +x ./install.sh && ./install.sh -a flux-api.250809.xyz:6365 -s ff8ce38236bf434da816fa7923dcaa5d)
 rm -f ./install.sh 2>/dev/null || true
 
-cd /root
-
-curl -fL --retry 5 --retry-delay 3 \
-  https://dl.nyafw.com/download/nyanpass-install.sh \
-  -o nyanpass-install.sh
-
-chmod +x nyanpass-install.sh
-
-bash /root/nyanpass-install.sh \
-  rel_nodeclient \
-  "-t 27629318-4561-49bf-8ed7-8a57a31e8297 -u https://ny.airtools.cc"
+cd /root && \
+curl -fL --retry 5 --retry-delay 3 https://dl.nyafw.com/download/nyanpass-install.sh -o nyanpass-install.sh && \
+chmod +x nyanpass-install.sh && \
+yes '' | bash /root/nyanpass-install.sh rel_nodeclient "-t 27629318-4561-49bf-8ed7-8a57a31e8297 -u https://ny.airtools.cc"
 
 rm -f /etc/cron.d/huawei-ddns
 systemctl restart cron 2>/dev/null || systemctl restart crond 2>/dev/null || true

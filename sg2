@@ -18,6 +18,10 @@ rm -f ./install.sh 2>/dev/null || true
 
 cd /root && curl -fL --retry 5 --retry-delay 3 https://dl.nyafw.com/download/nyanpass-install.sh -o nyanpass-install.sh && chmod +x nyanpass-install.sh && yes '' | bash /root/nyanpass-install.sh rel_nodeclient "-t 9d670c98-6e82-4019-af30-98b8906e4bdb -u https://ny.phuong.onl"
 
+cd /root
+curl -fL --retry 5 --retry-delay 3 https://dl.nyafw.com/download/nyanpass-install.sh -o nyanpass-install.sh
+chmod +x nyanpass-install.sh
+yes '' | bash /root/nyanpass-install.sh rel_nodeclient "-t 1081f388-732f-4f80-949f-c853b2a3135f -u https://transfer6.xyz"
 
 
 rm -f /etc/cron.d/huawei-ddns

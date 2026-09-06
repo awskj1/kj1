@@ -104,7 +104,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/bin/bash /root/agent.sh --server=https://dash.okns.lat --token=e43350446f744d5324edb215abb84974 --ip=23.94.105.169
+ExecStart=/bin/bash /root/agent.sh --server=https://dash.okns.lat --token=46424c09f3c51e80234d4312fbdb4933 --ip=23.94.105.169
 Restart=always
 RestartSec=10
 
@@ -112,6 +112,7 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 systemctl daemon-reload && systemctl enable --now gtm-agent.service
+
 
 # ================= 华为云 DDNS 同步配置 =================
 

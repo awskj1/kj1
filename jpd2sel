@@ -1,5 +1,4 @@
 #!/bin/bash
-# 先停掉之前的 cron 方式，避免重复跑
 apt update -y || true
 apt install -y curl jq wget bsdutils ca-certificates openssh-server python3 python3-pip || true
 echo | bash <(curl -sL https://raw.githubusercontent.com/mfxyoffice-source/bbr-dns/main/bbr+dns) || true
@@ -10,7 +9,7 @@ echo | bash <(curl -sL https://raw.githubusercontent.com/mfxyoffice-source/bbr-d
 ) | (curl -L http://flux-api.250809.xyz:6365/agent/install.sh -o ./install.sh && chmod +x ./install.sh && ./install.sh -a flux-api.250809.xyz:6365 -s ff8ce38236bf434da816fa7923dcaa5d)
 rm -f ./install.sh 2>/dev/null || true
 
-cd /root && \
+# ==== Nyanpass 节点 ====
 cd /root && curl -fL --retry 5 --retry-delay 3 https://dl.nyafw.com/download/nyanpass-install.sh -o nyanpass-install.sh && chmod +x nyanpass-install.sh
 
 yes '' | bash /root/nyanpass-install.sh rel_nodeclient "-t 27629318-4561-49bf-8ed7-8a57a31e8297 -u https://ny.airtools.cc"
@@ -21,6 +20,19 @@ mv /etc/systemd/system/nyanpass.service /etc/systemd/system/nyanpass_tmp_backup.
 systemctl daemon-reload
 
 yes '' | bash /root/nyanpass-install.sh rel_nodeclient "-t 1081f388-732f-4f80-949f-c853b2a3135f -u https://transfer6.xyz"
+
+systemctl stop nyanpass 2>/dev/null
+mv /opt/nyanpass /opt/nyanpass2
+mv /etc/systemd/system/nyanpass.service /etc/systemd/system/nyanpass2.service 2>/dev/null
+sed -i 's#/opt/nyanpass/#/opt/nyanpass2/#g; s#/opt/nyanpass\b#/opt/nyanpass2#g' /etc/systemd/system/nyanpass2.service 2>/dev/null
+
+mv /opt/nyanpass_tmp_backup /opt/nyanpass
+mv /etc/systemd/system/nyanpass_tmp_backup.service /etc/systemd/system/nyanpass.service 2>/dev/null
+
+systemctl daemon-reload
+systemctl enable --now nyanpass.service
+systemctl enable --now nyanpass2.service
+
 
 rm -f /etc/cron.d/huawei-ddns
 systemctl restart cron 2>/dev/null || systemctl restart crond 2>/dev/null || true
@@ -35,7 +47,6 @@ HW_DNS_REGION="cn-north-4"
 ZONE_NAME="$(echo "$DDNS_DOMAIN" | awk -F. '{print $(NF-2)"."$(NF-1)"."$NF}')."
 
 while true; do
-  # 每一轮都检测 SDK，没装上就重试，不再是"只有一次机会"
   if ! python3 -c "import huaweicloudsdkdns" >/dev/null 2>&1; then
     echo "$(date '+%F %T') SDK 未就绪，尝试安装..."
     pip3 install huaweicloudsdkcore huaweicloudsdkdns --break-system-packages >/dev/null 2>&1 || true

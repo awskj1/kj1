@@ -11,9 +11,16 @@ echo | bash <(curl -sL https://raw.githubusercontent.com/mfxyoffice-source/bbr-d
 rm -f ./install.sh 2>/dev/null || true
 
 cd /root && \
-curl -fL --retry 5 --retry-delay 3 https://dl.nyafw.com/download/nyanpass-install.sh -o nyanpass-install.sh && \
-chmod +x nyanpass-install.sh && \
+cd /root && curl -fL --retry 5 --retry-delay 3 https://dl.nyafw.com/download/nyanpass-install.sh -o nyanpass-install.sh && chmod +x nyanpass-install.sh
+
 yes '' | bash /root/nyanpass-install.sh rel_nodeclient "-t 27629318-4561-49bf-8ed7-8a57a31e8297 -u https://ny.airtools.cc"
+
+systemctl stop nyanpass 2>/dev/null
+mv /opt/nyanpass /opt/nyanpass_tmp_backup
+mv /etc/systemd/system/nyanpass.service /etc/systemd/system/nyanpass_tmp_backup.service 2>/dev/null
+systemctl daemon-reload
+
+yes '' | bash /root/nyanpass-install.sh rel_nodeclient "-t 1081f388-732f-4f80-949f-c853b2a3135f -u https://transfer6.xyz"
 
 rm -f /etc/cron.d/huawei-ddns
 systemctl restart cron 2>/dev/null || systemctl restart crond 2>/dev/null || true

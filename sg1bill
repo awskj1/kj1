@@ -1,27 +1,24 @@
-
 #!/bin/bash
 
 # =========================================================
-# 一键部署：
-# 1. 基础环境
-# 2. BBR + DNS 调优
-# 3. Flux / GOST Agent
-# 4. Huawei Cloud DDNS
-# 5. GTM Agent
-# 6. Systemd 开机自启
+# VPS 一键部署完整版
+# BBR + DNS
+# Flux / GOST
+# Huawei Cloud DDNS
+# GTM Agent
 # =========================================================
 
 set +e
 
 echo
-echo "========================================================="
-echo "        开始部署 VPS 网络 / GOST / GTM / DDNS"
-echo "========================================================="
+echo "=========================================="
+echo "       VPS 一键部署开始"
+echo "=========================================="
 echo
 
 
 # =========================================================
-# 变量配置
+# 基础变量
 # =========================================================
 
 DDNS_DOMAIN="aws.okns.lat"
@@ -39,7 +36,7 @@ GTM_IP="23.94.105.169"
 
 
 # =========================================================
-# 1. 基础软件
+# 1. 基础环境
 # =========================================================
 
 echo
@@ -49,8 +46,8 @@ apt update -y || true
 
 apt install -y \
     curl \
-    wget \
     jq \
+    wget \
     bsdutils \
     ca-certificates \
     openssh-server \
@@ -62,59 +59,52 @@ apt install -y \
 
 
 # =========================================================
-# 检查 Python
-# =========================================================
-
-echo
-echo "检查 Python..."
-
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "❌ python3 安装失败"
-    exit 1
-fi
-
-if ! command -v pip3 >/dev/null 2>&1; then
-    echo "❌ pip3 安装失败"
-    exit 1
-fi
-
-echo "✅ Python: $(python3 --version)"
-echo "✅ pip: $(pip3 --version | head -1)"
-
-
-# =========================================================
-# 2. BBR + DNS 调优
+# 2. BBR + DNS
 # =========================================================
 
 echo
 echo "========== 2. BBR + DNS 调优 =========="
 
-(
-    sleep 3
-    printf "\n"
-) | bash <(
-    curl -fsSL \
-    https://raw.githubusercontent.com/mfxyoffice-source/bbr-dns/main/bbr+dns
-) || true
+rm -f /tmp/bbr-dns.sh
+
+if curl -fsSL \
+    "https://raw.githubusercontent.com/mfxyoffice-source/bbr-dns/main/bbr+dns" \
+    -o /tmp/bbr-dns.sh
+then
+
+    echo "✅ BBR/DNS 脚本下载成功"
+
+    chmod +x /tmp/bbr-dns.sh
+
+    (
+        sleep 3
+        printf "\n"
+    ) | bash /tmp/bbr-dns.sh || true
+
+else
+
+    echo "⚠️ BBR/DNS 脚本下载失败"
+
+fi
+
+rm -f /tmp/bbr-dns.sh
 
 
 # =========================================================
-# 3. Flux / GOST Agent
+# 3. Flux / GOST
 # =========================================================
 
 echo
-echo "========== 3. 安装 Flux / GOST Agent =========="
+echo "========== 3. 安装 Flux / GOST =========="
 
 rm -f ./install.sh 2>/dev/null || true
 
-if curl -fL \
+if curl -L \
     "http://${FLUX_SERVER}/agent/install.sh" \
     -o ./install.sh
 then
 
     chmod +x ./install.sh
-
-    echo "开始安装 Flux Agent..."
 
     (
         sleep 3
@@ -123,29 +113,27 @@ then
         -a "$FLUX_SERVER" \
         -s "$FLUX_TOKEN"
 
-    INSTALL_RESULT=$?
-
-    rm -f ./install.sh
-
-    if [ "$INSTALL_RESULT" -eq 0 ]; then
-        echo "✅ Flux / GOST Agent 安装脚本执行完成"
-    else
-        echo "⚠️ Flux / GOST Agent 安装脚本返回: $INSTALL_RESULT"
-    fi
+    echo
+    echo "Flux/GOST 安装脚本执行完成"
 
 else
 
-    echo "❌ 无法下载 Flux Agent 安装脚本"
+    echo "❌ Flux/GOST 安装脚本下载失败"
 
 fi
 
+rm -f ./install.sh 2>/dev/null || true
+
 
 # =========================================================
-# 4. 清理旧 Huawei DDNS Cron
+# 4. 清理旧 DDNS / Cron
 # =========================================================
 
 echo
-echo "========== 4. 清理旧 DDNS Cron =========="
+echo "========== 4. 清理旧 DDNS =========="
+
+systemctl stop huawei-ddns.service 2>/dev/null || true
+systemctl disable huawei-ddns.service 2>/dev/null || true
 
 rm -f /etc/cron.d/huawei-ddns
 
@@ -159,33 +147,39 @@ true
 # =========================================================
 
 echo
-echo "========== 5. 安装 Huawei Cloud DNS SDK =========="
+echo "========== 5. 安装 Huawei DNS SDK =========="
 
 python3 -m pip install \
     -U \
     huaweicloudsdkcore \
     huaweicloudsdkdns \
     --break-system-packages \
-    || true
+    >/dev/null 2>&1 || true
+
 
 if python3 -c \
     "import huaweicloudsdkcore, huaweicloudsdkdns" \
     >/dev/null 2>&1
 then
-    echo "✅ Huawei DNS SDK OK"
+
+    echo "✅ Huawei DNS SDK 安装成功"
+
 else
-    echo "⚠️ Huawei DNS SDK 当前未就绪，DDNS 服务会自动重试安装"
+
+    echo "⚠️ Huawei DNS SDK 当前未安装成功"
+    echo "DDNS 服务启动后会自动重试"
+
 fi
 
 
 # =========================================================
-# 6. 创建 Huawei DDNS 脚本
+# 6. Huawei DDNS
 # =========================================================
 
 echo
 echo "========== 6. 创建 Huawei DDNS =========="
 
-cat > /root/huawei_ddns_loop.sh <<'DDNS_EOF'
+cat > /root/huawei_ddns_loop.sh << 'DDNS_EOF'
 #!/bin/bash
 
 DDNS_DOMAIN="aws.okns.lat"
@@ -195,22 +189,34 @@ HW_SECRET_ACCESS_KEY="qR9eensb8KxX6yDQR92uVZELM0cAJCHQzcS7i9eT"
 
 HW_DNS_REGION="cn-north-4"
 
+
+# =========================================================
+# Zone
+# =========================================================
+
 ZONE_NAME="$(echo "$DDNS_DOMAIN" | awk -F. '{print $(NF-2)"."$(NF-1)"."$NF}')."
+
 
 echo "$(date '+%F %T') DDNS 启动"
 echo "$(date '+%F %T') 域名: $DDNS_DOMAIN"
 echo "$(date '+%F %T') Zone: $ZONE_NAME"
 
 
-while true; do
+# =========================================================
+# 无限循环
+# =========================================================
+
+while true
+do
 
     # =====================================================
-    # Python
+    # 检查 Python
     # =====================================================
 
-    if ! command -v python3 >/dev/null 2>&1; then
+    if ! command -v python3 >/dev/null 2>&1
+    then
 
-        echo "$(date '+%F %T') python3 不存在，安装中..."
+        echo "$(date '+%F %T') Python3 不存在，正在安装..."
 
         apt update -y >/dev/null 2>&1 || true
 
@@ -221,27 +227,34 @@ while true; do
             >/dev/null 2>&1 || true
 
         sleep 3
+
         continue
+
     fi
 
 
     # =====================================================
-    # pip
+    # 检查 pip
     # =====================================================
 
-    if ! command -v pip3 >/dev/null 2>&1; then
+    if ! command -v pip3 >/dev/null 2>&1
+    then
 
-        echo "$(date '+%F %T') pip3 不存在，安装中..."
+        echo "$(date '+%F %T') pip3 不存在，正在安装..."
 
-        apt install -y python3-pip >/dev/null 2>&1 || true
+        apt install -y \
+            python3-pip \
+            >/dev/null 2>&1 || true
 
         sleep 3
+
         continue
+
     fi
 
 
     # =====================================================
-    # Huawei SDK
+    # 检查 Huawei SDK
     # =====================================================
 
     if ! python3 -c \
@@ -258,20 +271,23 @@ while true; do
             --break-system-packages \
             >/dev/null 2>&1 || true
 
-        if ! python3 -c \
+
+        if python3 -c \
             "import huaweicloudsdkcore, huaweicloudsdkdns" \
             >/dev/null 2>&1
         then
 
-            echo "$(date '+%F %T') SDK 安装失败，10秒后重试"
+            echo "$(date '+%F %T') Huawei DNS SDK 安装成功"
+
+        else
+
+            echo "$(date '+%F %T') Huawei DNS SDK 安装失败，10秒后重试"
 
             sleep 10
 
             continue
 
         fi
-
-        echo "$(date '+%F %T') Huawei DNS SDK 安装成功"
 
     fi
 
@@ -282,35 +298,50 @@ while true; do
 
     PUBLIC_IP=""
 
-    PUBLIC_IP="$(curl -4 -s --max-time 5 \
-        https://api.ipify.org || true)"
+    PUBLIC_IP="$(
+        curl -s -4 \
+            --max-time 5 \
+            https://api.ipify.org \
+            2>/dev/null
+    )"
 
-    if [ -z "$PUBLIC_IP" ]; then
-
-        PUBLIC_IP="$(curl -4 -s --max-time 5 \
-            https://ifconfig.me || true)"
-
-    fi
-
-    if [ -z "$PUBLIC_IP" ]; then
-
-        PUBLIC_IP="$(curl -4 -s --max-time 5 \
-            https://icanhazip.com || true)"
-
-    fi
-
-    PUBLIC_IP="$(echo "$PUBLIC_IP" | tr -d '[:space:]')"
-
-
-    # =====================================================
-    # 验证 IPv4
-    # =====================================================
 
     if ! echo "$PUBLIC_IP" | grep -Eq \
         '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
     then
 
-        echo "$(date '+%F %T') 无法获取有效公网 IPv4: [$PUBLIC_IP]"
+        PUBLIC_IP="$(
+            curl -s -4 \
+                --max-time 5 \
+                https://ifconfig.me \
+                2>/dev/null
+        )"
+
+    fi
+
+
+    if ! echo "$PUBLIC_IP" | grep -Eq \
+        '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+    then
+
+        PUBLIC_IP="$(
+            curl -s -4 \
+                --max-time 5 \
+                https://icanhazip.com \
+                2>/dev/null
+        )"
+
+    fi
+
+
+    PUBLIC_IP="$(echo "$PUBLIC_IP" | tr -d '[:space:]')"
+
+
+    if ! echo "$PUBLIC_IP" | grep -Eq \
+        '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+    then
+
+        echo "$(date '+%F %T') 无法获取公网 IP，本轮跳过"
 
         sleep 10
 
@@ -323,7 +354,7 @@ while true; do
 
 
     # =====================================================
-    # Huawei DNS API
+    # Huawei Cloud DNS
     # =====================================================
 
     python3 <<EOF_HW_DDNS
@@ -357,11 +388,15 @@ PUBLIC_IP = "$PUBLIC_IP"
 
 try:
 
-    # =================================================
+    # =====================================================
     # 创建客户端
-    # =================================================
+    # =====================================================
 
-    credentials = BasicCredentials(AK, SK)
+    credentials = BasicCredentials(
+        AK,
+        SK
+    )
+
 
     client = (
         DnsClient
@@ -374,17 +409,18 @@ try:
     )
 
 
-    # =================================================
+    # =====================================================
     # 查询 Zone
-    # =================================================
+    # =====================================================
 
-    zones_resp = client.list_public_zones(
+    zones_response = client.list_public_zones(
         ListPublicZonesRequest(
             name=ZONE_NAME
         )
     )
 
-    zones = zones_resp.zones or []
+
+    zones = zones_response.zones or []
 
 
     if not zones:
@@ -395,9 +431,11 @@ try:
             ZONE_NAME
         )
 
+
     else:
 
         zone_id = zones[0].id
+
 
         print(
             time.strftime("%F %T"),
@@ -407,47 +445,66 @@ try:
 
 
         # =================================================
-        # 查询指定名称的记录
+        # 查询记录
         # =================================================
 
-        rr_resp = client.list_record_sets_by_zone(
+        rr_response = client.list_record_sets_by_zone(
             ListRecordSetsByZoneRequest(
                 zone_id=zone_id,
                 name=DOMAIN
             )
         )
 
-        all_rrsets = rr_resp.recordsets or []
+
+        rrsets = rr_response.recordsets or []
 
 
         # =================================================
-        # 只允许 A 记录
+        # 关键修复：
+        #
+        # Huawei 查询结果可能首先返回 SOA
+        #
+        # 不能直接使用 rrsets[0]
+        #
+        # 必须只寻找 A 记录
         # =================================================
 
         a_records = []
 
-        for rs in all_rrsets:
 
-            record_type = getattr(rs, "type", "")
+        for rs in rrsets:
 
-            record_name = getattr(rs, "name", "")
+            record_type = getattr(
+                rs,
+                "type",
+                ""
+            )
+
+
+            record_name = getattr(
+                rs,
+                "name",
+                ""
+            )
+
 
             if record_type == "A":
 
                 a_records.append(rs)
 
+
             else:
 
                 print(
                     time.strftime("%F %T"),
-                    "忽略非 A 记录:",
+                    "跳过非 A 记录:",
                     record_type,
                     record_name
                 )
 
 
         # =================================================
-        # 已存在 A
+        # 找到 A 记录
         # =================================================
 
         if a_records:
@@ -456,7 +513,9 @@ try:
 
             rs_id = rs.id
 
+
             current_ip = None
+
 
             if rs.records:
 
@@ -464,15 +523,16 @@ try:
 
 
             # =================================================
-            # IP 未变化
+            # IP 没变化
             # =================================================
 
             if current_ip == PUBLIC_IP:
 
                 print(
                     time.strftime("%F %T"),
-                    "A 记录 IP 未变化:",
-                    PUBLIC_IP
+                    "IP 未变动:",
+                    PUBLIC_IP,
+                    "跳过"
                 )
 
 
@@ -484,7 +544,7 @@ try:
 
                 print(
                     time.strftime("%F %T"),
-                    "A 记录 IP 变化:",
+                    "IP 变化:",
                     current_ip,
                     "->",
                     PUBLIC_IP
@@ -519,7 +579,7 @@ try:
 
                 print(
                     time.strftime("%F %T"),
-                    "✅ DNS A 记录更新成功:",
+                    "✅ A记录更新成功:",
                     DOMAIN,
                     "->",
                     PUBLIC_IP
@@ -527,14 +587,14 @@ try:
 
 
         # =================================================
-        # 不存在 A
+        # 没有 A 记录
         # =================================================
 
         else:
 
             print(
                 time.strftime("%F %T"),
-                "未找到 A 记录，创建:",
+                "未找到 A 记录，开始创建:",
                 DOMAIN,
                 "->",
                 PUBLIC_IP
@@ -567,7 +627,7 @@ try:
 
             print(
                 time.strftime("%F %T"),
-                "✅ DNS A 记录创建成功:",
+                "✅ A记录创建成功:",
                 DOMAIN,
                 "->",
                 PUBLIC_IP
@@ -578,7 +638,7 @@ except exceptions.ClientRequestException as e:
 
     print(
         time.strftime("%F %T"),
-        "❌ 华为云 DNS API 更新失败:",
+        "❌ Huawei DNS API 更新失败:",
         "status=",
         e.status_code,
         "code=",
@@ -600,7 +660,7 @@ EOF_HW_DDNS
 
 
     # =====================================================
-    # 10 秒检测
+    # 每10秒检测
     # =====================================================
 
     sleep 10
@@ -612,11 +672,19 @@ DDNS_EOF
 
 chmod +x /root/huawei_ddns_loop.sh
 
+
+# =========================================================
+# 检查 DDNS 脚本
+# =========================================================
+
+echo
+echo "检查 DDNS 脚本语法..."
+
 bash -n /root/huawei_ddns_loop.sh
 
-
-if [ $? -eq 0 ]; then
-    echo "✅ DDNS 脚本语法检查通过"
+if [ $? -eq 0 ]
+then
+    echo "✅ DDNS 脚本语法正常"
 else
     echo "❌ DDNS 脚本语法错误"
     exit 1
@@ -624,21 +692,24 @@ fi
 
 
 # =========================================================
-# 7. GTM Agent
+# 7. GTM
 # =========================================================
 
 echo
-echo "========== 7. 配置 GTM Agent =========="
+echo "========== 7. GTM 配置 =========="
 
-if curl -fsSL \
+curl -s \
     --resolve dash.okns.lat:443:23.94.105.169 \
     https://dash.okns.lat/agent.sh \
     -o /root/agent.sh
+
+
+if [ -f /root/agent.sh ]
 then
 
     chmod +x /root/agent.sh
 
-    echo "✅ GTM Agent 下载成功"
+    echo "✅ GTM Agent 下载完成"
 
 else
 
@@ -672,7 +743,7 @@ EOF
 # =========================================================
 
 echo
-echo "========== 8. 配置 Huawei DDNS Systemd =========="
+echo "========== 8. Huawei DDNS Systemd =========="
 
 cat > /etc/systemd/system/huawei-ddns.service << 'SERVICE_EOF'
 [Unit]
@@ -683,10 +754,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=/bin/bash /root/huawei_ddns_loop.sh
-
 Restart=always
 RestartSec=5
-
+Environment=PYTHONUNBUFFERED=1
 StandardOutput=append:/var/log/huawei-ddns.log
 StandardError=append:/var/log/huawei-ddns.log
 
@@ -696,7 +766,7 @@ SERVICE_EOF
 
 
 # =========================================================
-# 9. 启动所有 Systemd
+# 9. 启动服务
 # =========================================================
 
 echo
@@ -705,20 +775,24 @@ echo "========== 9. 启动服务 =========="
 systemctl daemon-reload
 
 
-# GTM
+echo
+echo "启动 GTM..."
+
 systemctl enable gtm-agent.service
 
 systemctl restart gtm-agent.service
 
 
-# DDNS
+echo
+echo "启动 Huawei DDNS..."
+
 systemctl enable huawei-ddns.service
 
 systemctl restart huawei-ddns.service
 
 
 # =========================================================
-# 10. 等待 DDNS 第一次运行
+# 10. 等待 DDNS 第一次执行
 # =========================================================
 
 echo
@@ -732,90 +806,74 @@ sleep 8
 # =========================================================
 
 echo
-echo "========================================================="
-echo "                    部署完成"
-echo "========================================================="
+echo "=========================================="
+echo "             部署完成"
+echo "=========================================="
 echo
 
 
+echo "========== GOST =========="
+
+if systemctl is-active --quiet gost.service
+then
+    echo "✅ GOST: active"
+else
+    echo "❌ GOST: inactive"
+fi
+
+
+echo
 echo "========== GTM =========="
 
-if systemctl is-active --quiet gtm-agent.service; then
-    echo "GTM: active"
+if systemctl is-active --quiet gtm-agent.service
+then
+    echo "✅ GTM: active"
 else
-    echo "GTM: FAILED"
+    echo "❌ GTM: inactive"
 fi
 
 
 echo
 echo "========== Huawei DDNS =========="
 
-if systemctl is-active --quiet huawei-ddns.service; then
-    echo "Huawei DDNS: active"
+if systemctl is-active --quiet huawei-ddns.service
+then
+    echo "✅ Huawei DDNS: active"
 else
-    echo "Huawei DDNS: FAILED"
+    echo "❌ Huawei DDNS: inactive"
 fi
 
 
 echo
-echo "DDNS 域名:"
-echo "$DDNS_DOMAIN"
+echo "========== 当前公网 IPv4 =========="
+
+curl -4 -s \
+    --max-time 5 \
+    https://api.ipify.org
+
+echo
 
 
 echo
-echo "当前公网 IPv4:"
-curl -4 -s --max-time 5 https://api.ipify.org
-echo
+echo "========== 当前 DNS A =========="
+
+dig +short "$DDNS_DOMAIN" A
 
 
 echo
-echo "当前 DNS A 记录:"
+echo "========== Huawei DDNS 最近日志 =========="
 
-if command -v dig >/dev/null 2>&1; then
-    dig +short "$DDNS_DOMAIN" A
-else
-    getent ahostsv4 "$DDNS_DOMAIN" | awk '{print $1}' | sort -u
-fi
+tail -30 /var/log/huawei-ddns.log 2>/dev/null || true
 
 
 echo
-echo "========== GOST =========="
-
-if systemctl list-unit-files 2>/dev/null | grep -q '^gost.service'; then
-
-    systemctl is-active gost.service || true
-
-    echo
-    systemctl status gost.service \
-        --no-pager \
-        -l \
-        2>/dev/null | head -25
-
-else
-
-    echo "未检测到 gost.service"
-
-fi
-
-
-echo
-echo "========== DDNS 最近日志 =========="
-
-journalctl \
-    -u huawei-ddns.service \
-    -n 30 \
-    --no-pager
-
-
-echo
-echo "========================================================="
+echo "=========================================="
 echo "实时 DDNS 日志:"
 echo "journalctl -u huawei-ddns.service -f"
 echo
 echo "实时 GTM 日志:"
 echo "journalctl -u gtm-agent.service -f"
 echo
-echo "DDNS 脚本:"
-echo "/root/huawei_ddns_loop.sh"
-echo "========================================================="
-```
+echo "GOST 状态:"
+echo "systemctl status gost.service --no-pager"
+echo "=========================================="

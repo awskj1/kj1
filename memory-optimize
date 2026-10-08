@@ -2,9 +2,15 @@ cat > /root/server-guard.sh <<'EOF'
 #!/bin/bash
 
 # =========================================================
-# 1GB Debian 服务器自动守护
+# 1GB Debian 服务器自动守护 / 内存保护增强版
 # DDNS / Hinet换IP / Xray / v2node / GOST
-# 不修改原有业务配置
+#
+# 原则：
+# 1. 正常情况下绝不重启业务
+# 2. 服务 FAILED 才自动恢复
+# 3. 内存真正危险时才处理 v2node / GOST
+# 4. 不设置 MemoryMax，避免人为限制业务
+# 5. 保留 Swap，降低 OOM 风险
 # =========================================================
 
 LOG="/var/log/server-guard.log"
@@ -17,13 +23,21 @@ log() {
     echo "[$(date '+%F %T')] $*" >> "$LOG"
 }
 
+service_exists() {
+    systemctl cat "$1" >/dev/null 2>&1
+}
+
 restart_failed() {
     local svc="$1"
 
-    if systemctl list-unit-files "$svc" >/dev/null 2>&1; then
+    if service_exists "$svc"; then
         if systemctl is-failed --quiet "$svc"; then
+
             log "检测到 $svc FAILED，开始自动恢复"
+
+            systemctl reset-failed "$svc" 2>/dev/null || true
             systemctl restart "$svc"
+
             sleep 5
 
             if systemctl is-active --quiet "$svc"; then
@@ -39,101 +53,200 @@ restart_failed() {
 # A. 自动恢复异常服务
 # =========================================================
 
-# DDNS
 restart_failed "ddns-go.service"
-
-# GOST
 restart_failed "gost.service"
-
-# v2node
 restart_failed "v2node.service"
-
-# 常见 Xray 服务名
 restart_failed "xray.service"
 
-# Hinet 自动换 IP
 restart_failed "hinet-changeip.service"
 restart_failed "changeip.service"
-
-# 兼容你之前可能使用的 hinet-changeip 命名
 restart_failed "hinet_changeip.service"
 
 # =========================================================
-# B. 内存保护
+# B. 获取当前内存
 # =========================================================
 
-AVAIL_KB=$(awk '/MemAvailable/ {print $2}' /proc/meminfo)
-AVAIL_MB=$((AVAIL_KB / 1024))
-
-# 低于120MB：只处理最大的 v2node
-if [ "$AVAIL_MB" -lt 120 ]; then
-
-    log "WARNING: 可用内存 ${AVAIL_MB}MB，进入内存保护"
-
-    if systemctl is-active --quiet v2node.service; then
-        log "内存不足，重启 v2node"
-        systemctl restart v2node.service
-        sleep 15
-    fi
-
-    sync
-    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
-
+get_memory() {
     AVAIL_KB=$(awk '/MemAvailable/ {print $2}' /proc/meminfo)
     AVAIL_MB=$((AVAIL_KB / 1024))
 
-    log "v2node处理后可用内存 ${AVAIL_MB}MB"
+    SWAP_TOTAL_KB=$(awk '/SwapTotal/ {print $2}' /proc/meminfo)
+    SWAP_FREE_KB=$(awk '/SwapFree/ {print $2}' /proc/meminfo)
+
+    if [ "$SWAP_TOTAL_KB" -gt 0 ]; then
+        SWAP_USED_KB=$((SWAP_TOTAL_KB - SWAP_FREE_KB))
+        SWAP_USED_MB=$((SWAP_USED_KB / 1024))
+        SWAP_TOTAL_MB=$((SWAP_TOTAL_KB / 1024))
+    else
+        SWAP_USED_MB=0
+        SWAP_TOTAL_MB=0
+    fi
+}
+
+get_memory
+
+# =========================================================
+# C. 正常状态
+# =========================================================
+
+if [ "$AVAIL_MB" -ge 150 ]; then
+    log "内存正常: Available=${AVAIL_MB}MB Swap=${SWAP_USED_MB}/${SWAP_TOTAL_MB}MB"
 fi
 
-# 如果仍然低于100MB，再处理GOST
+# =========================================================
+# D. 内存警告
+# =========================================================
+#
+# 150MB以上：
+#     什么都不做
+#
+# 100~149MB：
+#     记录警告，不重启业务
+#
+# 70~99MB：
+#     重启 v2node
+#
+# <70MB：
+#     v2node + GOST保护
+# =========================================================
+
+if [ "$AVAIL_MB" -lt 150 ] && [ "$AVAIL_MB" -ge 100 ]; then
+    log "WARNING: 可用内存 ${AVAIL_MB}MB，但未达到重启阈值"
+fi
+
+# =========================================================
+# E. 第一级保护：v2node
+# =========================================================
+
 if [ "$AVAIL_MB" -lt 100 ]; then
 
-    log "CRITICAL: 可用内存 ${AVAIL_MB}MB，重启 GOST"
+    # 防止2分钟周期内重复触发
+    if [ ! -f /run/server-guard-v2node ]; then
 
-    if systemctl is-active --quiet gost.service; then
-        systemctl restart gost.service
-        sleep 10
+        log "WARNING: 可用内存 ${AVAIL_MB}MB，进入 v2node 内存保护"
+
+        touch /run/server-guard-v2node
+
+        if systemctl is-active --quiet v2node.service; then
+
+            log "重启 v2node 释放内存"
+
+            systemctl restart v2node.service
+
+            sleep 15
+        fi
+
+        sync
+        echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+
+        get_memory
+
+        log "v2node处理后: Available=${AVAIL_MB}MB Swap=${SWAP_USED_MB}/${SWAP_TOTAL_MB}MB"
+
+    else
+        log "v2node保护冷却中，当前 Available=${AVAIL_MB}MB"
     fi
-
-    sync
-    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
-
-    log "GOST处理完成"
+else
+    rm -f /run/server-guard-v2node
 fi
 
 # =========================================================
-# C. 清理日志文件
+# F. 第二级保护：GOST
 # =========================================================
 
-# systemd日志控制在80MB以内
+if [ "$AVAIL_MB" -lt 70 ]; then
+
+    if [ ! -f /run/server-guard-gost ]; then
+
+        log "CRITICAL: 可用内存 ${AVAIL_MB}MB，进入 GOST 内存保护"
+
+        touch /run/server-guard-gost
+
+        if systemctl is-active --quiet gost.service; then
+
+            log "重启 GOST 释放内存"
+
+            systemctl restart gost.service
+
+            sleep 10
+        fi
+
+        sync
+        echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+
+        get_memory
+
+        log "GOST处理后: Available=${AVAIL_MB}MB Swap=${SWAP_USED_MB}/${SWAP_TOTAL_MB}MB"
+
+    else
+        log "GOST保护冷却中，当前 Available=${AVAIL_MB}MB"
+    fi
+else
+    rm -f /run/server-guard-gost
+fi
+
+# =========================================================
+# G. Swap异常监控
+# =========================================================
+
+get_memory
+
+if [ "$SWAP_TOTAL_MB" -gt 0 ]; then
+
+    if [ "$SWAP_USED_MB" -gt 768 ]; then
+        log "WARNING: Swap使用超过768MB，目前 ${SWAP_USED_MB}/${SWAP_TOTAL_MB}MB"
+    fi
+
+fi
+
+# =========================================================
+# H. 日志 / 缓存清理
+# =========================================================
+
+# systemd journal 最大控制在80MB
 journalctl --vacuum-size=80M >/dev/null 2>&1 || true
 
 # APT缓存
 apt-get clean >/dev/null 2>&1 || true
 
-# 清理超过2天的临时文件
+# 删除超过2天的临时文件
 find /tmp -xdev -type f -mtime +2 -delete 2>/dev/null || true
 find /var/tmp -xdev -type f -mtime +2 -delete 2>/dev/null || true
 
-# changeip日志超过20MB才截断
+# =========================================================
+# I. Hinet / changeip 日志保护
+# =========================================================
+
 if [ -f /root/changeip.log ]; then
+
     SIZE=$(stat -c%s /root/changeip.log 2>/dev/null || echo 0)
 
     if [ "$SIZE" -gt 20971520 ]; then
+
         tail -n 3000 /root/changeip.log > /root/changeip.log.tmp
+
         mv /root/changeip.log.tmp /root/changeip.log
+
         log "changeip.log 超过20MB，已保留最近3000行"
     fi
+
 fi
 
-# server-guard自身日志超过5MB
+# =========================================================
+# J. server-guard自身日志保护
+# =========================================================
+
 if [ -f "$LOG" ]; then
+
     SIZE=$(stat -c%s "$LOG" 2>/dev/null || echo 0)
 
     if [ "$SIZE" -gt 5242880 ]; then
+
         tail -n 2000 "$LOG" > "$LOG.tmp"
+
         mv "$LOG.tmp" "$LOG"
     fi
+
 fi
 
 exit 0
@@ -141,17 +254,18 @@ EOF
 
 chmod 700 /root/server-guard.sh
 
-
 # =========================================================
-# 创建 Swap
+# Swap
 # =========================================================
 
 if ! swapon --show | grep -q '/swapfile'; then
 
     if [ ! -f /swapfile ]; then
+
         fallocate -l 1G /swapfile
         chmod 600 /swapfile
         mkswap /swapfile >/dev/null
+
     fi
 
     swapon /swapfile 2>/dev/null || true
@@ -159,9 +273,13 @@ if ! swapon --show | grep -q '/swapfile'; then
     if ! grep -q '^/swapfile ' /etc/fstab; then
         echo '/swapfile none swap sw 0 0' >> /etc/fstab
     fi
+
 fi
 
-# 低频使用Swap，优先保证业务内存
+# =========================================================
+# 内存参数
+# =========================================================
+
 cat > /etc/sysctl.d/99-server-memory.conf <<'EOF'
 vm.swappiness=10
 vm.vfs_cache_pressure=50
@@ -169,9 +287,8 @@ EOF
 
 sysctl --system >/dev/null 2>&1
 
-
 # =========================================================
-# systemd watchdog
+# systemd Guard
 # =========================================================
 
 cat > /etc/systemd/system/server-guard.service <<'EOF'
@@ -184,7 +301,6 @@ Wants=network-online.target
 Type=oneshot
 ExecStart=/root/server-guard.sh
 EOF
-
 
 cat > /etc/systemd/system/server-guard.timer <<'EOF'
 [Unit]
@@ -200,9 +316,8 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-
 # =========================================================
-# 每日深度清理
+# Daily Cleanup
 # =========================================================
 
 cat > /etc/systemd/system/server-clean.service <<'EOF'
@@ -213,7 +328,6 @@ Description=Daily Server Cleanup
 Type=oneshot
 ExecStart=/root/server-guard.sh
 EOF
-
 
 cat > /etc/systemd/system/server-clean.timer <<'EOF'
 [Unit]
@@ -228,7 +342,6 @@ RandomizedDelaySec=60
 WantedBy=timers.target
 EOF
 
-
 # =========================================================
 # 启用
 # =========================================================
@@ -238,12 +351,15 @@ systemctl daemon-reload
 systemctl enable --now server-guard.timer
 systemctl enable --now server-clean.timer
 
+# =========================================================
 # 立即执行一次
+# =========================================================
+
 systemctl start server-guard.service
 
 echo
 echo "========================================"
-echo " 自动保护已经安装完成"
+echo " 服务器内存保护优化完成"
 echo "========================================"
 
 echo
@@ -256,11 +372,16 @@ swapon --show
 
 echo
 echo "=== 关键服务 ==="
-for S in ddns-go gost v2node xray hinet-changeip changeip; do
-    if systemctl list-unit-files "${S}.service" 2>/dev/null | grep -q "${S}.service"; then
-        printf "%-20s " "${S}.service"
+
+for S in ddns-go gost v2node xray hinet-changeip changeip hinet_changeip; do
+
+    if systemctl cat "${S}.service" >/dev/null 2>&1; then
+
+        printf "%-25s " "${S}.service"
         systemctl is-active "${S}.service" 2>/dev/null || true
+
     fi
+
 done
 
 echo

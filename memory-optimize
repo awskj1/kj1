@@ -1,0 +1,279 @@
+cat > /root/server-guard.sh <<'EOF'
+#!/bin/bash
+
+# =========================================================
+# 1GB Debian 服务器自动守护
+# DDNS / Hinet换IP / Xray / v2node / GOST
+# 不修改原有业务配置
+# =========================================================
+
+LOG="/var/log/server-guard.log"
+LOCK="/run/server-guard.lock"
+
+exec 9>"$LOCK"
+flock -n 9 || exit 0
+
+log() {
+    echo "[$(date '+%F %T')] $*" >> "$LOG"
+}
+
+restart_failed() {
+    local svc="$1"
+
+    if systemctl list-unit-files "$svc" >/dev/null 2>&1; then
+        if systemctl is-failed --quiet "$svc"; then
+            log "检测到 $svc FAILED，开始自动恢复"
+            systemctl restart "$svc"
+            sleep 5
+
+            if systemctl is-active --quiet "$svc"; then
+                log "$svc 恢复成功"
+            else
+                log "$svc 恢复失败"
+            fi
+        fi
+    fi
+}
+
+# =========================================================
+# A. 自动恢复异常服务
+# =========================================================
+
+# DDNS
+restart_failed "ddns-go.service"
+
+# GOST
+restart_failed "gost.service"
+
+# v2node
+restart_failed "v2node.service"
+
+# 常见 Xray 服务名
+restart_failed "xray.service"
+
+# Hinet 自动换 IP
+restart_failed "hinet-changeip.service"
+restart_failed "changeip.service"
+
+# 兼容你之前可能使用的 hinet-changeip 命名
+restart_failed "hinet_changeip.service"
+
+# =========================================================
+# B. 内存保护
+# =========================================================
+
+AVAIL_KB=$(awk '/MemAvailable/ {print $2}' /proc/meminfo)
+AVAIL_MB=$((AVAIL_KB / 1024))
+
+# 低于120MB：只处理最大的 v2node
+if [ "$AVAIL_MB" -lt 120 ]; then
+
+    log "WARNING: 可用内存 ${AVAIL_MB}MB，进入内存保护"
+
+    if systemctl is-active --quiet v2node.service; then
+        log "内存不足，重启 v2node"
+        systemctl restart v2node.service
+        sleep 15
+    fi
+
+    sync
+    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+
+    AVAIL_KB=$(awk '/MemAvailable/ {print $2}' /proc/meminfo)
+    AVAIL_MB=$((AVAIL_KB / 1024))
+
+    log "v2node处理后可用内存 ${AVAIL_MB}MB"
+fi
+
+# 如果仍然低于100MB，再处理GOST
+if [ "$AVAIL_MB" -lt 100 ]; then
+
+    log "CRITICAL: 可用内存 ${AVAIL_MB}MB，重启 GOST"
+
+    if systemctl is-active --quiet gost.service; then
+        systemctl restart gost.service
+        sleep 10
+    fi
+
+    sync
+    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+
+    log "GOST处理完成"
+fi
+
+# =========================================================
+# C. 清理日志文件
+# =========================================================
+
+# systemd日志控制在80MB以内
+journalctl --vacuum-size=80M >/dev/null 2>&1 || true
+
+# APT缓存
+apt-get clean >/dev/null 2>&1 || true
+
+# 清理超过2天的临时文件
+find /tmp -xdev -type f -mtime +2 -delete 2>/dev/null || true
+find /var/tmp -xdev -type f -mtime +2 -delete 2>/dev/null || true
+
+# changeip日志超过20MB才截断
+if [ -f /root/changeip.log ]; then
+    SIZE=$(stat -c%s /root/changeip.log 2>/dev/null || echo 0)
+
+    if [ "$SIZE" -gt 20971520 ]; then
+        tail -n 3000 /root/changeip.log > /root/changeip.log.tmp
+        mv /root/changeip.log.tmp /root/changeip.log
+        log "changeip.log 超过20MB，已保留最近3000行"
+    fi
+fi
+
+# server-guard自身日志超过5MB
+if [ -f "$LOG" ]; then
+    SIZE=$(stat -c%s "$LOG" 2>/dev/null || echo 0)
+
+    if [ "$SIZE" -gt 5242880 ]; then
+        tail -n 2000 "$LOG" > "$LOG.tmp"
+        mv "$LOG.tmp" "$LOG"
+    fi
+fi
+
+exit 0
+EOF
+
+chmod 700 /root/server-guard.sh
+
+
+# =========================================================
+# 创建 Swap
+# =========================================================
+
+if ! swapon --show | grep -q '/swapfile'; then
+
+    if [ ! -f /swapfile ]; then
+        fallocate -l 1G /swapfile
+        chmod 600 /swapfile
+        mkswap /swapfile >/dev/null
+    fi
+
+    swapon /swapfile 2>/dev/null || true
+
+    if ! grep -q '^/swapfile ' /etc/fstab; then
+        echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    fi
+fi
+
+# 低频使用Swap，优先保证业务内存
+cat > /etc/sysctl.d/99-server-memory.conf <<'EOF'
+vm.swappiness=10
+vm.vfs_cache_pressure=50
+EOF
+
+sysctl --system >/dev/null 2>&1
+
+
+# =========================================================
+# systemd watchdog
+# =========================================================
+
+cat > /etc/systemd/system/server-guard.service <<'EOF'
+[Unit]
+Description=Server DDNS Xray GOST Memory Guard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/root/server-guard.sh
+EOF
+
+
+cat > /etc/systemd/system/server-guard.timer <<'EOF'
+[Unit]
+Description=Server Guard Every 2 Minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=10s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+
+# =========================================================
+# 每日深度清理
+# =========================================================
+
+cat > /etc/systemd/system/server-clean.service <<'EOF'
+[Unit]
+Description=Daily Server Cleanup
+
+[Service]
+Type=oneshot
+ExecStart=/root/server-guard.sh
+EOF
+
+
+cat > /etc/systemd/system/server-clean.timer <<'EOF'
+[Unit]
+Description=Daily Server Cleanup Timer
+
+[Timer]
+OnCalendar=*-*-* 04:10:00
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target
+EOF
+
+
+# =========================================================
+# 启用
+# =========================================================
+
+systemctl daemon-reload
+
+systemctl enable --now server-guard.timer
+systemctl enable --now server-clean.timer
+
+# 立即执行一次
+systemctl start server-guard.service
+
+echo
+echo "========================================"
+echo " 自动保护已经安装完成"
+echo "========================================"
+
+echo
+echo "=== 内存 ==="
+free -h
+
+echo
+echo "=== Swap ==="
+swapon --show
+
+echo
+echo "=== 关键服务 ==="
+for S in ddns-go gost v2node xray hinet-changeip changeip; do
+    if systemctl list-unit-files "${S}.service" 2>/dev/null | grep -q "${S}.service"; then
+        printf "%-20s " "${S}.service"
+        systemctl is-active "${S}.service" 2>/dev/null || true
+    fi
+done
+
+echo
+echo "=== 定时器 ==="
+systemctl list-timers --all | grep -E 'server-(guard|clean)' || true
+
+echo
+echo "=== 当前最大内存进程 ==="
+ps -eo pid,user,%mem,rss,cmd --sort=-rss | head -10
+
+echo
+echo "=== 守护日志 ==="
+tail -20 /var/log/server-guard.log 2>/dev/null || true
+
+echo
+echo "完成。"

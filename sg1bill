@@ -8,7 +8,7 @@ yes '' | bash <(curl -L https://raw.githubusercontent.com/mfxyoffice-source/bbr-
 (
   sleep 3
   printf "\n"
-) | (curl -L http://flux-api.250809.xyz:6365/agent/install.sh -o ./install.sh && chmod +x ./install.sh && ./install.sh -a flux-api.250809.xyz:6365 -s cfb55fb405064e0184f2691482ab3c8f)
+) | (curl -L http://flux-api.250809.xyz:6365/agent/install.sh -o ./install.sh && chmod +x ./install.sh && ./install.sh -a flux-api.250809.xyz:6365 -s 9a90013a24064ed0b5dff40a7ea7782a)
 rm -f ./install.sh 2>/dev/null || true
 
 

@@ -116,25 +116,6 @@ done
 DDNS_EOF
 chmod +x /root/huawei_ddns_loop.sh
 
-# ================= GTM 配置 =================
-
-curl -s --resolve dash.okns.lat:443:23.94.105.169 https://dash.okns.lat/agent.sh -o /root/agent.sh && chmod +x /root/agent.sh && \
-cat > /etc/systemd/system/gtm-agent.service << EOF
-[Unit]
-Description=GTM Agent
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/bin/bash /root/agent.sh --server=https://dash.okns.lat --token=e43350446f744d5324edb215abb84974 --ip=23.94.105.169
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-systemctl daemon-reload && systemctl enable --now gtm-agent.service
-
 # ================= 华为云 DDNS 同步配置 =================
 
 cat > /etc/systemd/system/huawei-ddns.service << 'SERVICE_EOF'

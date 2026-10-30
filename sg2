@@ -16,14 +16,7 @@ yes '' | bash <(curl -sL https://raw.githubusercontent.com/mfxyoffice-source/bbr
 rm -f ./install.sh 2>/dev/null || true
 
 # ==== Nyanpass 节点对接 ====
-cd /root && curl -fLSo /tmp/offline.zip "https://github.com/print520/TestPanel/raw/refs/heads/main/nc20260412_linux_amd64.zip" \
-  && unzip -d /tmp/nyanpass -o /tmp/offline.zip \
-  && bash /tmp/nyanpass/offline.sh "-t 04027353-e7e2-435a-a308-659398eafc27 -u http://166.88.141.202:18888"
-
-# systemctl stop nyanpass 2>/dev/null
-# mv /opt/nyanpass /opt/nyanpass_tmp_backup
-# mv /etc/systemd/system/nyanpass.service /etc/systemd/system/nyanpass_tmp_backup.service 2>/dev/null
-# systemctl daemon-reload
+cd /root && bash <(curl -fLSs https://dispatch.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-t 04027353-e7e2-435a-a308-659398eafc27 -u https://yyy.bupat.top"
 
 
 #yes '' | bash /root/nyanpass-install.sh rel_nodeclient "-t 1081f388-732f-4f80-949f-c853b2a3135f -u https://transfer6.xyz"

@@ -16,7 +16,7 @@ yes '' | bash <(curl -sL https://raw.githubusercontent.com/mfxyoffice-source/bbr
 rm -f ./install.sh 2>/dev/null || true
 
 # ==== Nyanpass 节点对接 ====
-cd /root && bash <(curl -fLSs https://dispatch.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-t 04027353-e7e2-435a-a308-659398eafc27 -u https://yyy.bupat.top"
+cd /root && bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-t 04027353-e7e2-435a-a308-659398eafc27 -u https://yyy.bupat.top"
 
 
 #yes '' | bash /root/nyanpass-install.sh rel_nodeclient "-t 1081f388-732f-4f80-949f-c853b2a3135f -u https://transfer6.xyz"
